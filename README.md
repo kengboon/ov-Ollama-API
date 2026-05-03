@@ -63,7 +63,7 @@ Features:
 | ARC discrete | A770, B580 | Same as iGPU, more VRAM for larger models | VLM: no, LLM: yes |
 | CPU | Any Intel CPU | Fallback for everything | Yes (slowly) |
 
-### Benchmark (Core Ultra 7 258V, ARC 140V 16 GB)
+### Benchmark (Core Ultra 7 258V, ARC 140V 16 GB) — laptop, LPDDR5X
 
 Tested with `benchmark.py` — 1 warmup + 5 runs, outliers discarded.
 
@@ -103,6 +103,65 @@ than NPU for this hardware.
 CPU beats NPU on throughput (~7.4 vs ~5.2 tok/s) for this model.
 GPU text is fast but runs a smaller 3B model (not directly comparable).
 VLM image responses take ~3-4s regardless of answer length.
+
+### Benchmark (Core Ultra 9 285K, RTX 5090) — desktop, DDR5
+
+Same Qwen3 8B INT4-CW model on every Intel device, plus the same model
+served via Ollama (GGUF Q4_K_M) on the RTX 5090 for context. 1 warmup +
+3 runs. The "count 1-100" test (`max_tokens=4096`, no-think) is the
+cleanest cross-stack number — long output, steady-state, no thinking confound.
+
+```powershell
+# Each NoLlama device — restart the server with --device <name> first
+python benchmark.py --label npu --runs 3 --llm-only
+python benchmark.py --label igpu --runs 3 --llm-only
+python benchmark.py --label cpu --runs 3 --llm-only
+
+# Ollama (any backend it's running on — CUDA, ROCm, CPU)
+python benchmark.py --backend ollama --model qwen3:8b --label rtx5090 --runs 3 --llm-only
+```
+
+**Decode throughput, count-1-100 test:**
+
+| Backend | Device | TTFT | Decode tok/s | Speed vs CPU |
+|---|---|---|---|---|
+| Ollama (GGUF/CUDA) | RTX 5090 | 0.19s | 197 | 11.1× |
+| NoLlama (OpenVINO) | CPU (8P + 16E @ DDR5) | 3.84s | 17.8 | 1.0× |
+| NoLlama (OpenVINO) | iGPU (Xe-LPG, 4 cores) | 4.01s | 15.4 | 0.87× |
+| NoLlama (OpenVINO) | NPU 3 (Intel AI Boost) | 10.6s | 10.0 | 0.56× |
+
+**Surprises on this hardware:**
+
+- **CPU beats iGPU.** Arrow Lake's 285K (8P + 16E at high clocks) plus
+  OpenVINO's tuned INT4 CPU kernels add up to more decode throughput
+  than the small Xe-LPG iGPU (only 4 Xe cores on the desktop part —
+  the laptop's ARC 140V has 8). Both share the same DDR5 pool, so the
+  iGPU has no bandwidth advantage, only a compute disadvantage.
+- **NPU is the slowest Intel device on desktop**, opposite of the laptop
+  story. NPU's value is power efficiency (laptop on battery), not
+  throughput on mains.
+- **Prefill scales differently than decode.** RTX 5090's TTFT advantage
+  over NPU is ~55× (0.19s vs 10.6s); its decode advantage is ~20×.
+  Long prompts amplify the gap.
+- **The dGPU dominates** — if you have one, use it. NoLlama's CPU
+  fallback is good for "Intel-only laptop on battery", not for
+  competing with a discrete card.
+
+**Why the desktop iGPU/NPU are slower than the laptop's:**
+LPDDR5X-8533 (laptop, ~136 GB/s) vs DDR5-6400 dual-channel (desktop,
+~100 GB/s). Decode throughput on INT4 LLMs is memory-bandwidth-bound,
+so the laptop's faster system memory closes some of the gap that
+silicon size alone would suggest. (The Core Ultra 7 258V Lunar Lake
+NPU also has more compute units than the 285K Arrow Lake NPU.)
+
+**Practical guidance:**
+
+| Hardware | Best NoLlama device |
+|---|---|
+| Intel Core Ultra laptop (Lunar Lake) | NPU (efficiency) or ARC 140V iGPU |
+| Intel Arrow Lake desktop, no dGPU | **CPU** — surprisingly best |
+| Intel + ARC discrete (A770, B580) | ARC discrete |
+| Intel + NVIDIA discrete | Use Ollama for the dGPU; NoLlama on CPU/NPU/iGPU as fallback |
 
 ### Dual mode (NPU + GPU)
 

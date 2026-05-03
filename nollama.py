@@ -1166,14 +1166,23 @@ def check_port(port):
 
 
 def detect_devices():
-    """Return dict of available devices: {name: full_name}."""
+    """Return dict of available devices: {name: full_name}.
+
+    Non-Intel GPUs are filtered out: OpenVINO's intel_gpu plugin enumerates
+    any OpenCL-capable GPU (NVIDIA, AMD), but its kernels only run on Intel
+    hardware. Selecting a non-Intel GPU produces hundreds of compile errors
+    and crashes at warmup with CL_INVALID_VALUE — better not to offer it.
+    """
     devices = {}
     core = ov.Core()
     for d in core.get_available_devices():
         try:
-            devices[d] = core.get_property(d, "FULL_DEVICE_NAME")
+            full_name = core.get_property(d, "FULL_DEVICE_NAME")
         except Exception:
-            devices[d] = d
+            full_name = d
+        if d.startswith("GPU") and "intel" not in full_name.lower():
+            continue
+        devices[d] = full_name
     return devices
 
 

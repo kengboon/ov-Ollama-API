@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""NoLlama benchmark — compare workloads across devices.
+"""NoLlama benchmark — compare workloads across devices and backends.
 
 Usage:
-    python benchmark.py                     # use running server at localhost:8000
+    # NoLlama server (auto-detects devices/models from /health):
+    python benchmark.py --label npu              # tag this run for later compare
     python benchmark.py --url http://host:9000
-    python benchmark.py --runs 3            # fewer runs for quick test
 
-Runs the test suite from TODO.md:
-  - VLM: "Is this the same vehicle?" (two images)
-  - LLM thinking: "Explain the Egyptian method for multiplication"
-  - LLM no-think: same prompt with no-think system message
-  - LLM simple thinking: "Count to 100"
-  - LLM simple no-think: same with no-think
+    # Ollama backend (e.g. RTX 5090):
+    python benchmark.py --backend ollama --model qwen3:8b --label rtx5090
 
-Each test: 1 warmup + N runs. Discards outliers, reports averages.
+    # Cross-stack workflow (same model on each device):
+    #   1. ollama:    benchmark.py --backend ollama --model qwen3:8b --label rtx5090
+    #   2. NPU:       (start nollama --device NPU)  benchmark.py --label npu
+    #   3. iGPU:      (start nollama --device GPU)  benchmark.py --label igpu
+    #   4. CPU:       (start nollama --device CPU)  benchmark.py --label cpu
+    # Results land in bench-results/<label>-<model>-<timestamp>.json
+
+Each test: 1 warmup + N runs. Reports avg elapsed, TTFT (prefill latency),
+overall tok/s, and decode-only tok/s (excluding prefill). Discards IQR outliers.
 """
 
 import argparse
@@ -46,8 +50,19 @@ def image_to_b64(path):
 
 
 def stream_request(url, body):
-    """Send a streaming chat request, return (full_text, token_count, elapsed)."""
+    """Send a streaming chat request. Returns (text, tokens, elapsed, ttft).
+
+    Counts both `delta.content` and `delta.reasoning` (Ollama's thinking
+    channel) as tokens. NoLlama doesn't separate <think> from content, so
+    summing both gives apples-to-apples decode throughput across backends.
+
+    ttft = time-to-first-token (prefill latency); first of either channel.
+    `tokens` is the total (content + reasoning).
+    `text` is content only — `body["_capture_reasoning"] = True` includes both.
+    """
     import urllib.request
+
+    capture_reasoning = body.pop("_capture_reasoning", False) if isinstance(body, dict) else False
 
     data = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -57,10 +72,13 @@ def stream_request(url, body):
     )
 
     t0 = time.perf_counter()
-    tokens = 0
-    full_text = ""
+    ttft = None
+    content_tokens = 0
+    reasoning_tokens = 0
+    content_text = ""
+    reasoning_text = ""
 
-    with urllib.request.urlopen(req, timeout=300) as resp:
+    with urllib.request.urlopen(req, timeout=600) as resp:
         buffer = ""
         while True:
             chunk = resp.read(4096)
@@ -79,18 +97,31 @@ def stream_request(url, body):
                     obj = json.loads(payload)
                     delta = obj.get("choices", [{}])[0].get("delta", {})
                     content = delta.get("content", "")
+                    reasoning = delta.get("reasoning", "") or delta.get("reasoning_content", "")
                     if content:
-                        full_text += content
-                        tokens += 1
+                        if ttft is None:
+                            ttft = time.perf_counter() - t0
+                        content_text += content
+                        content_tokens += 1
+                    if reasoning:
+                        if ttft is None:
+                            ttft = time.perf_counter() - t0
+                        reasoning_text += reasoning
+                        reasoning_tokens += 1
                 except json.JSONDecodeError:
                     pass
 
     elapsed = time.perf_counter() - t0
-    return full_text, tokens, elapsed
+    if ttft is None:
+        ttft = elapsed
+    total_tokens = content_tokens + reasoning_tokens
+    full_text = (f"<think>{reasoning_text}</think>\n{content_text}"
+                 if capture_reasoning and reasoning_text else content_text)
+    return full_text, total_tokens, elapsed, ttft
 
 
 def non_stream_request(url, body):
-    """Send a non-streaming chat request, return (full_text, token_count, elapsed)."""
+    """Send a non-streaming chat request. Returns (text, tokens, elapsed, ttft)."""
     import urllib.request
 
     body["stream"] = False
@@ -107,8 +138,12 @@ def non_stream_request(url, body):
 
     elapsed = time.perf_counter() - t0
     text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-    tokens = len(text.split())  # rough estimate for non-streaming
-    return text, tokens, elapsed
+    # Prefer real token count from usage.completion_tokens if present
+    usage = result.get("usage") or {}
+    completion_tokens = usage.get("completion_tokens")
+    tokens = completion_tokens if isinstance(completion_tokens, int) and completion_tokens > 0 \
+        else len(text.split())
+    return text, tokens, elapsed, elapsed
 
 
 def get_models(url):
@@ -187,53 +222,64 @@ TESTS_GPU_TEXT = [
     make_llm_test(
         "GPU text: say hello (thinking)",
         "Say hello.",
-        max_tokens=64,
+        max_tokens=2048,
         force_no_stream=True,
     ),
     make_llm_test(
         "GPU text: say hello (no-think)",
         "Say hello.",
         no_think=True,
-        max_tokens=64,
+        max_tokens=2048,
         force_no_stream=True,
     ),
     make_llm_test(
         "GPU text: what is 2+2 (thinking)",
         "What is 2+2?",
-        max_tokens=64,
+        max_tokens=2048,
         force_no_stream=True,
     ),
     make_llm_test(
         "GPU text: what is 2+2 (no-think)",
         "What is 2+2?",
         no_think=True,
-        max_tokens=64,
+        max_tokens=2048,
         force_no_stream=True,
     ),
 ]
 
+# Cross-stack tip: Qwen3 only honors `/no_think` literally in the user prompt,
+# not via system message. The no_think system prompt below is best-effort and
+# may still trigger thinking on some Qwen3 builds — that's fine, we capture
+# both content and reasoning channels and count them together for tok/s.
 TESTS_LLM = [
     make_llm_test(
         "LLM: say hello (thinking)",
         "Say hello.",
-        max_tokens=64,
+        max_tokens=2048,
     ),
     make_llm_test(
         "LLM: say hello (no-think)",
-        "Say hello.",
+        "Say hello. /no_think",
         no_think=True,
-        max_tokens=64,
+        max_tokens=2048,
     ),
     make_llm_test(
         "LLM: what is 2+2 (thinking)",
         "What is 2+2?",
-        max_tokens=64,
+        max_tokens=2048,
     ),
     make_llm_test(
         "LLM: what is 2+2 (no-think)",
-        "What is 2+2?",
+        "What is 2+2? /no_think",
         no_think=True,
-        max_tokens=64,
+        max_tokens=2048,
+    ),
+    # Decode-bound test: predictable long output, exercises steady-state tok/s.
+    make_llm_test(
+        "LLM: count 1-100 (no-think)",
+        "List the integers from 1 to 100, separated by commas, on a single line. /no_think",
+        no_think=True,
+        max_tokens=4096,
     ),
 ]
 
@@ -243,13 +289,17 @@ TESTS_LLM = [
 # ---------------------------------------------------------------------------
 
 def run_test(url, model, test_name, test_fn, n_runs, warmup=True):
-    """Run a test N times with optional warmup. Returns list of (tokens, elapsed, tps)."""
+    """Run a test N times with optional warmup.
+
+    Returns list of dicts with keys: tokens, elapsed, ttft, tps, decode_tps.
+    decode_tps excludes prefill: tokens / (elapsed - ttft).
+    """
     results = []
 
     if warmup:
         print(f"    warmup...", end="", flush=True)
         try:
-            _, _, w_elapsed = test_fn(url, model)
+            _, _, w_elapsed, _ = test_fn(url, model)
             print(f" {w_elapsed:.1f}s", flush=True)
         except Exception as e:
             print(f" FAILED: {e}")
@@ -258,10 +308,16 @@ def run_test(url, model, test_name, test_fn, n_runs, warmup=True):
     for i in range(n_runs):
         print(f"    run {i+1}/{n_runs}...", end="", flush=True)
         try:
-            text, tokens, elapsed = test_fn(url, model)
+            text, tokens, elapsed, ttft = test_fn(url, model)
             tps = tokens / elapsed if elapsed > 0 else 0
-            results.append((tokens, elapsed, tps))
-            print(f" {tokens} tok, {elapsed:.1f}s, {tps:.1f} tok/s", flush=True)
+            decode_time = elapsed - ttft
+            decode_tps = tokens / decode_time if decode_time > 0.01 else tps
+            results.append({
+                "tokens": tokens, "elapsed": elapsed, "ttft": ttft,
+                "tps": tps, "decode_tps": decode_tps,
+            })
+            print(f" {tokens} tok, {elapsed:.1f}s, ttft={ttft:.2f}s, "
+                  f"{tps:.1f} tok/s ({decode_tps:.1f} decode)", flush=True)
         except Exception as e:
             print(f" FAILED: {e}")
 
@@ -285,21 +341,28 @@ def summarize(results):
     """Compute averages after discarding outliers."""
     if not results:
         return None
-    elapsed_vals = [r[1] for r in results]
-    tps_vals = [r[2] for r in results]
-    tok_vals = [r[0] for r in results]
+    tok_vals = [r["tokens"] for r in results]
+    elapsed_vals = [r["elapsed"] for r in results]
+    ttft_vals = [r["ttft"] for r in results]
+    tps_vals = [r["tps"] for r in results]
+    decode_tps_vals = [r["decode_tps"] for r in results]
 
     elapsed_clean = discard_outliers(elapsed_vals)
     tps_clean = discard_outliers(tps_vals)
+    decode_tps_clean = discard_outliers(decode_tps_vals)
+    ttft_clean = discard_outliers(ttft_vals)
 
     return {
         "runs": len(results),
         "runs_after_outliers": len(elapsed_clean),
         "avg_tokens": statistics.mean(tok_vals),
         "avg_elapsed": statistics.mean(elapsed_clean),
+        "avg_ttft": statistics.mean(ttft_clean),
         "avg_tps": statistics.mean(tps_clean),
+        "avg_decode_tps": statistics.mean(decode_tps_clean),
         "stdev_elapsed": statistics.stdev(elapsed_clean) if len(elapsed_clean) > 1 else 0,
         "stdev_tps": statistics.stdev(tps_clean) if len(tps_clean) > 1 else 0,
+        "raw_runs": results,
     }
 
 
@@ -310,8 +373,22 @@ def summarize(results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--url", default="http://localhost:8000",
-                        help="Server URL (default: http://localhost:8000)")
+    parser.add_argument("--backend", choices=["nollama", "ollama"], default="nollama",
+                        help="Server type. nollama (default) auto-detects via /health; "
+                             "ollama uses --model directly and skips health check.")
+    parser.add_argument("--url", default=None,
+                        help="Server URL. Default: http://localhost:8000 for nollama, "
+                             "http://localhost:11434 for ollama.")
+    parser.add_argument("--model", default=None,
+                        help="Model name to test (required for --backend ollama, "
+                             "optional override for nollama).")
+    parser.add_argument("--label", default=None,
+                        help="Tag for output JSON (e.g. 'rtx5090', 'npu', 'igpu', 'cpu'). "
+                             "Defaults to backend name.")
+    parser.add_argument("--output-dir", default="bench-results",
+                        help="Directory for JSON results (default: bench-results)")
+    parser.add_argument("--no-save", action="store_true",
+                        help="Skip saving results to JSON")
     parser.add_argument("--runs", type=int, default=5,
                         help="Number of test runs per workload (default: 5)")
     parser.add_argument("--llm-only", action="store_true",
@@ -326,6 +403,23 @@ def main():
     parser.add_argument("--diff-1", help="Path to 'different vehicle' image A")
     parser.add_argument("--diff-2", help="Path to 'different vehicle' image B")
     args = parser.parse_args()
+
+    # Default URL per backend
+    if args.url is None:
+        args.url = "http://localhost:11434" if args.backend == "ollama" \
+            else "http://localhost:8000"
+    if args.label is None:
+        args.label = args.backend
+
+    if args.backend == "ollama":
+        if not args.model:
+            print("ERROR: --model required for --backend ollama (e.g. --model qwen3:8b)")
+            sys.exit(1)
+        if args.vlm_only:
+            print("ERROR: --vlm-only not supported for ollama backend")
+            sys.exit(1)
+        # Ollama is text-only here — VLM tests are NoLlama-specific
+        args.llm_only = True
 
     # Resolve image paths (explicit flags win over --images-dir)
     def resolve(explicit, default_name):
@@ -355,36 +449,57 @@ def main():
 
     TESTS_VLM = build_vlm_tests(same_1, same_2, diff_1, diff_2) if vlm_paths_ok else []
 
-    # Check server
-    print(f"Connecting to {args.url}...")
-    try:
-        health = check_health(args.url)
-    except Exception as e:
-        print(f"ERROR: Cannot reach server: {e}")
-        sys.exit(1)
+    print(f"Connecting to {args.url} ({args.backend})...")
 
-    if health["status"] != "ready":
-        print(f"ERROR: Server not ready (status: {health['status']})")
-        sys.exit(1)
-
-    models = get_models(args.url)
-    print(f"Server ready. Models:")
-    for m in models:
-        print(f"  {m['id']}")
-    print()
-
-    # Find VLM and LLM models from health endpoint (has type info)
     vlm_model = None
     llm_model = None
-    devices = health.get("devices", {})
-    for dev_name, dev_info in devices.items():
-        if dev_info.get("status") != "ready":
-            continue
-        model_id = f"{dev_info['model']}@{dev_name.upper()}"
-        if dev_info.get("type") == "vlm":
-            vlm_model = model_id
-        elif dev_info.get("type") == "llm":
-            llm_model = model_id
+
+    if args.backend == "ollama":
+        # Sanity-check: hit /v1/models, confirm requested model exists
+        try:
+            models = get_models(args.url)
+        except Exception as e:
+            print(f"ERROR: Cannot reach Ollama at {args.url}: {e}")
+            sys.exit(1)
+        ids = [m.get("id") for m in models]
+        if args.model not in ids:
+            print(f"ERROR: model '{args.model}' not found on server. Available:")
+            for i in ids:
+                print(f"  {i}")
+            sys.exit(1)
+        llm_model = args.model
+        print(f"Ollama ready. Testing model: {llm_model}\n")
+    else:
+        # NoLlama: use /health to discover devices and types
+        try:
+            health = check_health(args.url)
+        except Exception as e:
+            print(f"ERROR: Cannot reach server: {e}")
+            sys.exit(1)
+
+        if health["status"] != "ready":
+            print(f"ERROR: Server not ready (status: {health['status']})")
+            sys.exit(1)
+
+        models = get_models(args.url)
+        print(f"Server ready. Models:")
+        for m in models:
+            print(f"  {m['id']}")
+        print()
+
+        devices = health.get("devices", {})
+        for dev_name, dev_info in devices.items():
+            if dev_info.get("status") != "ready":
+                continue
+            model_id = f"{dev_info['model']}@{dev_name.upper()}"
+            if dev_info.get("type") == "vlm":
+                vlm_model = model_id
+            elif dev_info.get("type") == "llm":
+                llm_model = model_id
+
+        # Allow --model to override discovered LLM model
+        if args.model:
+            llm_model = args.model
 
     all_results = {}
 
@@ -438,15 +553,40 @@ def main():
         print("No LLM model found, skipping text tests.\n")
 
     # --- Summary table ---
-    print("=" * 70)
-    print(f"{'Test':<45} {'Time':>7} {'Tok/s':>7} {'Tokens':>7}")
-    print("-" * 70)
+    print("=" * 88)
+    print(f"{'Test':<45} {'Time':>7} {'TTFT':>6} {'Tok/s':>7} {'Decode':>7} {'Tokens':>7}")
+    print("-" * 88)
     for name, s in all_results.items():
         if s:
-            print(f"{name:<45} {s['avg_elapsed']:>6.1f}s {s['avg_tps']:>6.1f} {s['avg_tokens']:>7.0f}")
+            print(f"{name:<45} {s['avg_elapsed']:>6.1f}s {s['avg_ttft']:>5.2f}s "
+                  f"{s['avg_tps']:>6.1f} {s['avg_decode_tps']:>6.1f} {s['avg_tokens']:>7.0f}")
         else:
             print(f"{name:<45} {'FAILED':>7}")
-    print("=" * 70)
+    print("=" * 88)
+
+    # --- Save raw results to JSON ---
+    if not args.no_save and all_results:
+        os.makedirs(args.output_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        # Sanitize model name for filename: qwen3:8b -> qwen3-8b
+        model_for_file = (llm_model or vlm_model or "unknown").replace(":", "-").replace("/", "-").replace("@", "-at-")
+        out_path = os.path.join(
+            args.output_dir,
+            f"{args.label}-{model_for_file}-{ts}.json",
+        )
+        payload = {
+            "label": args.label,
+            "backend": args.backend,
+            "url": args.url,
+            "llm_model": llm_model,
+            "vlm_model": vlm_model,
+            "runs_per_test": args.runs,
+            "timestamp": ts,
+            "results": all_results,
+        }
+        with open(out_path, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+        print(f"\nSaved: {out_path}")
 
 
 if __name__ == "__main__":

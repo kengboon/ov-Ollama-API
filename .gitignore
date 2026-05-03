@@ -5,3 +5,4 @@ venv/
 start.ps1
 __pycache__/
 *.pyc
+bench-results/
