@@ -173,8 +173,9 @@ def extract_text(result):
 class DeviceSlot:
     """One loaded model on one device."""
 
-    def __init__(self, device_name):
-        self.device_name = device_name   # "NPU", "GPU", "CPU"
+    def __init__(self, device_name, device_id=None):
+        self.device_name = device_name   # canonical "NPU", "GPU", "CPU" (display + routing)
+        self.device_id = device_id or device_name  # OpenVINO id (may be "GPU.1" on multi-GPU)
         self.device_full = ""            # "Intel(R) AI Boost"
         self.pipe = None
         self.model_name = ""
@@ -200,16 +201,16 @@ class DeviceSlot:
             VLMPipe = getattr(ovg, "VLMPipeline", None)
             if VLMPipe is None:
                 raise RuntimeError("No VLMPipeline in this openvino_genai build.")
-            self.pipe = VLMPipe(str(model_dir), device=self.device_name)
+            self.pipe = VLMPipe(str(model_dir), device=self.device_id)
         else:
             # NPU has a default prompt limit of 1024 tokens — raise it
             if self.device_name == "NPU":
                 self.pipe = ovg.LLMPipeline(
-                    str(model_dir), device=self.device_name,
+                    str(model_dir), device=self.device_id,
                     MAX_PROMPT_LEN=4096,
                 )
             else:
-                self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_name)
+                self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id)
 
     def warmup(self):
         self.status = "warming_up"
@@ -412,8 +413,9 @@ def _load_audio(file_storage):
 class WhisperSlot:
     """Holds a WhisperPipeline for speech-to-text."""
 
-    def __init__(self, device_name):
+    def __init__(self, device_name, device_id=None):
         self.device_name = device_name
+        self.device_id = device_id or device_name
         self.device_full = ""
         self.pipe = None
         self.model_name = ""
@@ -432,7 +434,7 @@ class WhisperSlot:
                 "No WhisperPipeline in this openvino_genai build. "
                 "Upgrade to openvino-genai >= 2025.1."
             )
-        self.pipe = WhisperPipe(str(model_dir), self.device_name)
+        self.pipe = WhisperPipe(str(model_dir), self.device_id)
 
     def warmup(self):
         self.status = "ready"
@@ -1166,7 +1168,11 @@ def check_port(port):
 
 
 def detect_devices():
-    """Return dict of available devices: {name: full_name}.
+    """Return {kind: {"id": ov_id, "name": full_name}} of usable devices.
+
+    kind is the canonical category ("NPU", "GPU", "CPU"). For "GPU", "id"
+    may be "GPU.0", "GPU.1", etc. when OpenVINO enumerates multiple GPUs;
+    callers must pass "id" to OpenVINO, not "kind".
 
     Non-Intel GPUs are filtered out: OpenVINO's intel_gpu plugin enumerates
     any OpenCL-capable GPU (NVIDIA, AMD), but its kernels only run on Intel
@@ -1180,9 +1186,13 @@ def detect_devices():
             full_name = core.get_property(d, "FULL_DEVICE_NAME")
         except Exception:
             full_name = d
-        if d.startswith("GPU") and "intel" not in full_name.lower():
-            continue
-        devices[d] = full_name
+        if d.startswith("GPU"):
+            if "intel" not in full_name.lower():
+                continue
+            if "GPU" not in devices:  # first Intel GPU wins
+                devices["GPU"] = {"id": d, "name": full_name}
+        elif d in ("NPU", "CPU"):
+            devices[d] = {"id": d, "name": full_name}
     return devices
 
 
@@ -1213,7 +1223,7 @@ def _load_in_background(slot, model_dir, devices, port, ollama_port, banner_slot
     """Background thread: load model + warmup on one device."""
     global _banner_printed
     try:
-        slot.device_full = devices.get(slot.device_name, slot.device_name)
+        slot.device_full = devices.get(slot.device_name, {}).get("name", slot.device_name)
         slot.load(model_dir)
         slot.warmup()
     except Exception as e:
@@ -1307,9 +1317,13 @@ def main():
     # 2. Detect devices
     devices = detect_devices()
     print("  Devices:", flush=True)
-    for d, name in devices.items():
-        print(f"    {d}: {name}")
+    for kind, info in devices.items():
+        suffix = f" [{info['id']}]" if info['id'] != kind else ""
+        print(f"    {kind}{suffix}: {info['name']}")
     print()
+
+    def _id_of(kind):
+        return devices.get(kind, {}).get("id", kind)
 
     # 3. Resolve primary device
     device = args.device.upper()
@@ -1340,14 +1354,14 @@ def main():
         sys.exit(1)
 
     # 5. Create device slots
-    primary = DeviceSlot(device)
+    primary = DeviceSlot(device, _id_of(device))
     all_slots = [primary]
 
     if args.gpu_model_dir:
         if "GPU" not in devices:
             print("WARNING: --gpu-model-dir given but no GPU detected. Ignoring.")
         else:
-            secondary = DeviceSlot("GPU")
+            secondary = DeviceSlot("GPU", _id_of("GPU"))
             all_slots.append(secondary)
 
     if args.whisper_dir:
@@ -1355,7 +1369,7 @@ def main():
         if whisper_device not in devices and whisper_device != "CPU":
             print(f"WARNING: Whisper device {whisper_device} not available, falling back to CPU.")
             whisper_device = "CPU"
-        whisper_slot = WhisperSlot(whisper_device)
+        whisper_slot = WhisperSlot(whisper_device, _id_of(whisper_device))
         all_slots.append(whisper_slot)
 
     # 6. Start Flask, load models in background

@@ -63,6 +63,21 @@ Features:
 | ARC discrete | A770, B580 | Same as iGPU, more VRAM for larger models | VLM: no, LLM: yes |
 | CPU | Any Intel CPU | Fallback for everything | Yes (slowly) |
 
+### Intel only — by design
+
+NoLlama is Intel-hardware-only and will stay that way. Non-Intel GPUs
+(NVIDIA, AMD) are filtered out of device detection on purpose, even
+though OpenVINO 2026 now ships an experimental NVIDIA plugin via
+[`openvino-extensibility`](https://docs.openvino.ai/2026/documentation/openvino-extensibility/openvino-plugin-library/plugin.html).
+That path drags CUDA/cuDNN into the stack — it's a developer-backend
+extension, not a drop-in user feature, and it loses every reason
+NoLlama exists in the first place (NPU-first, Intel-first, no CUDA).
+
+If you have an NVIDIA GPU, **use Ollama**. Ollama will always do
+Ollama better than NoLlama could, and that's the right tool for that
+hardware. NoLlama's value is specifically the Intel NPU / ARC story
+that Ollama doesn't tell.
+
 ### Benchmark (Core Ultra 7 258V, ARC 140V 16 GB) — laptop, LPDDR5X
 
 Tested with `benchmark.py` — 1 warmup + 5 runs, outliers discarded.
@@ -370,6 +385,42 @@ python nollama.py --model-dir ~/models/my-model --device GPU
 python nollama.py --gpu-model-dir ~/models/my-vlm
 ```
 
+### Finding newer/better models
+
+The model menus rot fast — new architectures appear monthly. The
+authoritative place to look is the OpenVINO org on HuggingFace:
+
+**[huggingface.co/OpenVINO](https://huggingface.co/OpenVINO)**
+
+These are pre-exported by Intel, so they install instantly (no
+conversion). What to look for:
+
+| Suffix | Where it runs | Notes |
+|---|---|---|
+| `-int4-cw-ov` | NPU + GPU | Channel-wise INT4. NPU's preferred format. |
+| `-int4-ov` | GPU only | Standard INT4. Not always NPU-compatible. |
+| `-int8-ov` | GPU + CPU | Better fine-detail retention than INT4 (OCR, numbers). |
+| `-fp16-ov` | GPU + CPU | Full precision. Largest, slowest, sharpest. |
+
+Quick rules of thumb:
+- **NPU chat:** must be `-int4-cw-ov` and ≤ ~10 GB.
+- **GPU vision (VLM):** any `-int4-ov` or `-int8-ov` model marked
+  "Image-Text-to-Text" on HF.
+- **GPU LLM (smarter than NPU):** any `-int4-ov` model up to your
+  VRAM. Above ~16 GB falls back to CPU silently.
+- **Whisper (STT):** OpenVINO ships pre-quantized whisper variants
+  (`whisper-{tiny,base,small,medium,large-v3}-{int4,int8,fp16}-ov`).
+
+Once a model proves itself, add it to `models.json` so it appears in
+the install menu. Keep "Untested" tags on entries that haven't been
+verified yet — be honest about what's measured vs. assumed.
+
+> **Notable as of May 2026:** OpenVINO ships
+> [Qwen3-VL-8B](https://huggingface.co/OpenVINO/Qwen3-VL-8B-Instruct-int4-ov)
+> pre-exported in INT4/INT8/FP16. This is the natural vision sibling
+> to the proven Qwen3-8B NPU chat model and is now in `models.json`
+> as Untested — verify before promoting to Recommended.
+
 ### NPU models (chat)
 
 | Model | Size | Notes |
@@ -384,10 +435,12 @@ python nollama.py --gpu-model-dir ~/models/my-vlm
 
 | Model | Size | Notes |
 |---|---|---|
-| Gemma 3 4B Vision (INT4) | ~3 GB | Fast, good quality. |
-| Gemma 3 12B Vision (INT4) | ~7 GB | Excellent quality. |
-| Qwen2.5-VL 7B (INT4) | ~5 GB | Proven architecture. |
-| InternVL2 4B (INT4) | ~3 GB | Good small VLM. |
+| Qwen3-VL 8B (INT4) | ~6 GB | Untested. Newer Qwen-VL generation; expected upgrade. |
+| Qwen2.5-VL 3B (INT8, convert) | ~4 GB | Recommended (proven). INT8 better at fine detail (OCR, numbers). |
+| Gemma 3 4B Vision (INT4) | ~3 GB | Untested. |
+| Gemma 3 12B Vision (INT4) | ~7 GB | Untested. Needs ~12 GB RAM with KV cache. |
+| InternVL2 4B (INT4) | ~3 GB | Untested. |
+| Phi 3.5 Vision (INT4) | ~3 GB | Untested. |
 
 ### GPU large LLMs (smarter than NPU)
 
@@ -433,6 +486,7 @@ The repo is pure code.
 
 ## Requirements
 
+- PowerShell 7+ (Windows PowerShell 5.1 is not supported)
 - Python 3.10+
 - OpenVINO 2026.1+ with openvino-genai
 - At least one of:

@@ -1,3 +1,4 @@
+#requires -Version 7.0
 # install.ps1 — NoLlama setup: venv, dependencies, model selection
 #
 # Usage:
@@ -26,9 +27,27 @@ Write-Host ""
 # ---------------------------------------------------------------------------
 
 $VenvDir = Join-Path $ScriptDir "venv"
+
+# Validate existing venv. Script launchers (pip.exe, hf.exe, ...) bake the
+# absolute path to python.exe into themselves at install time. If the venv
+# folder is moved or renamed, every launcher fails with "Unable to create
+# process". Catch that here and recreate, rather than failing mid-install.
 if (Test-Path $VenvDir) {
-    Write-Host "[OK] venv already exists"
-} else {
+    $venvPip = Join-Path $VenvDir "Scripts\pip.exe"
+    $venvOk = $false
+    if (Test-Path $venvPip) {
+        & $venvPip --version 2>&1 | Out-Null
+        $venvOk = ($LASTEXITCODE -eq 0)
+    }
+    if ($venvOk) {
+        Write-Host "[OK] venv already exists"
+    } else {
+        Write-Host "[!] venv at $VenvDir is broken (likely moved from another path). Recreating..." -ForegroundColor Yellow
+        Remove-Item -Recurse -Force $VenvDir
+    }
+}
+
+if (-not (Test-Path $VenvDir)) {
     Write-Host "Creating Python venv..."
     python -m venv $VenvDir
     if (-not $?) { Write-Host "ERROR: Failed to create venv. Is Python installed?" -ForegroundColor Red; Pop-Location; exit 1 }
@@ -50,25 +69,39 @@ Write-Host ""
 # ---------------------------------------------------------------------------
 
 Write-Host "Detecting devices..." -ForegroundColor Cyan
+# Mirror nollama.py's detect_devices(): canonical-keyed {kind: {id, name}}.
+# Filter non-Intel GPUs (NVIDIA/AMD enumerated via OpenCL are unusable —
+# crash with CL_INVALID_VALUE at warmup). Normalize multi-GPU enumeration
+# (GPU.0/GPU.1) to a single canonical "GPU" entry pointing at the first
+# Intel GPU; "id" preserves the real OpenVINO device id for --device.
 $DeviceInfo = python -c @"
 import openvino as ov, json
 core = ov.Core()
-d = {}
+out = {}
 for dev in core.get_available_devices():
-    try: d[dev] = core.get_property(dev, 'FULL_DEVICE_NAME')
-    except: d[dev] = dev
-print(json.dumps(d))
+    try: full = core.get_property(dev, 'FULL_DEVICE_NAME')
+    except: full = dev
+    if dev.startswith('GPU'):
+        if 'intel' not in full.lower(): continue
+        if 'GPU' not in out: out['GPU'] = {'id': dev, 'name': full}
+    elif dev in ('NPU', 'CPU'):
+        out[dev] = {'id': dev, 'name': full}
+print(json.dumps(out))
 "@ | ConvertFrom-Json
 
 $HasNPU = $null -ne $DeviceInfo.NPU
 $HasGPU = $null -ne $DeviceInfo.GPU
 
 Write-Host ""
-if ($HasNPU) { Write-Host "  [+] NPU: $($DeviceInfo.NPU)" -ForegroundColor Green }
+if ($HasNPU) { Write-Host "  [+] NPU: $($DeviceInfo.NPU.name)" -ForegroundColor Green }
 else         { Write-Host "  [-] NPU: not found" -ForegroundColor DarkGray }
-if ($HasGPU) { Write-Host "  [+] GPU: $($DeviceInfo.GPU)" -ForegroundColor Green }
-else         { Write-Host "  [-] GPU: not found" -ForegroundColor DarkGray }
-Write-Host "  [+] CPU: $($DeviceInfo.CPU)" -ForegroundColor DarkGray
+if ($HasGPU) {
+    $gpuSuffix = if ($DeviceInfo.GPU.id -ne "GPU") { " [$($DeviceInfo.GPU.id)]" } else { "" }
+    Write-Host "  [+] GPU$($gpuSuffix): $($DeviceInfo.GPU.name)" -ForegroundColor Green
+} else {
+    Write-Host "  [-] GPU: not found (non-Intel GPUs are filtered)" -ForegroundColor DarkGray
+}
+Write-Host "  [+] CPU: $($DeviceInfo.CPU.name)" -ForegroundColor DarkGray
 Write-Host ""
 
 # ---------------------------------------------------------------------------
@@ -205,6 +238,26 @@ function Show-ModelMenu {
 # Helper: download or link a model into a target directory
 # ---------------------------------------------------------------------------
 
+function Test-ModelCacheValid {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    return (Test-Path (Join-Path $Path "openvino_language_model.bin")) -or
+           (Test-Path (Join-Path $Path "openvino_model.bin"))
+}
+
+function New-ModelJunction {
+    param([string]$TargetDir, [string]$CachePath)
+    if (Test-Path $TargetDir) {
+        $item = Get-Item $TargetDir
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            cmd /c rmdir "`"$TargetDir`""
+        } else {
+            Remove-Item -Recurse -Force $TargetDir
+        }
+    }
+    cmd /c mklink /J "`"$TargetDir`"" "`"$CachePath`"" | Out-Null
+}
+
 function Install-Model {
     param(
         [PSCustomObject]$Selected,
@@ -213,65 +266,76 @@ function Install-Model {
 
     if ($Selected.Action -eq "local") {
         Write-Host "Linking to: $($Selected.Path)" -ForegroundColor Green
-        if (Test-Path $TargetDir) {
-            $item = Get-Item $TargetDir
-            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                cmd /c rmdir "`"$TargetDir`""
-            } else {
-                Remove-Item -Recurse -Force $TargetDir
-            }
-        }
-        cmd /c mklink /J "`"$TargetDir`"" "`"$($Selected.Path)`""
+        New-ModelJunction -TargetDir $TargetDir -CachePath $Selected.Path
         Write-Host "[OK] $($Selected.Name)" -ForegroundColor Green
         return $true
     }
 
+    # pre-exported and convert both cache into ~/models/<name>/ first, then
+    # junction $TargetDir → cache. Lets re-installs detect the existing
+    # model (scan looks at ~/models/) and skip the download.
     if ($Selected.Action -eq "pre-exported") {
-        Write-Host "Downloading $($Selected.Name)..." -ForegroundColor Cyan
-        Write-Host "  From: $($Selected.HfId)"
-        Write-Host ""
-        if (Test-Path $TargetDir) {
-            $item = Get-Item $TargetDir
-            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                cmd /c rmdir "`"$TargetDir`""
-            } else {
-                Remove-Item -Recurse -Force $TargetDir
+        $cacheName = ($Selected.HfId -split '/')[-1]
+        $cachePath = Join-Path $ModelsRoot $cacheName
+
+        if (Test-ModelCacheValid -Path $cachePath) {
+            Write-Host "Using cached $($Selected.Name) at $cachePath" -ForegroundColor Green
+        } else {
+            if (Test-Path $cachePath) {
+                Write-Host "  Found incomplete cache at $cachePath, removing." -ForegroundColor DarkGray
+                Remove-Item -Recurse -Force $cachePath
+            }
+            New-Item -ItemType Directory -Path $ModelsRoot -Force | Out-Null
+            Write-Host "Downloading $($Selected.Name)..." -ForegroundColor Cyan
+            Write-Host "  From: $($Selected.HfId)"
+            Write-Host "  To:   $cachePath"
+            Write-Host ""
+            $env:PYTHONIOENCODING = "utf-8"
+            hf download $Selected.HfId --local-dir $cachePath
+            if (-not $?) {
+                Write-Host "ERROR: Download failed." -ForegroundColor Red
+                Write-Host "  If 401/403: run 'huggingface-cli login' first" -ForegroundColor Yellow
+                return $false
             }
         }
-        $env:PYTHONIOENCODING = "utf-8"
-        hf download $Selected.HfId --local-dir $TargetDir
-        if (-not $?) {
-            Write-Host "ERROR: Download failed." -ForegroundColor Red
-            Write-Host "  If 401/403: run 'huggingface-cli login' first" -ForegroundColor Yellow
-            return $false
-        }
+
+        New-ModelJunction -TargetDir $TargetDir -CachePath $cachePath
         Write-Host "[OK] $($Selected.Name)" -ForegroundColor Green
         return $true
     }
 
     if ($Selected.Action -eq "convert") {
-        Write-Host "Converting $($Selected.Name)..." -ForegroundColor Cyan
-        Write-Host "  From: $($Selected.HfId)"
-        Write-Host "  This may take 5-20 minutes."
-        Write-Host ""
-        if (Test-Path $TargetDir) {
-            $item = Get-Item $TargetDir
-            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                cmd /c rmdir "`"$TargetDir`""
-            } else {
-                Remove-Item -Recurse -Force $TargetDir
+        # Include weight format in cache name so int4 and int8 conversions
+        # of the same model don't collide.
+        $cacheName = "$(($Selected.HfId -split '/')[-1])-$($Selected.Weight)"
+        $cachePath = Join-Path $ModelsRoot $cacheName
+
+        if (Test-ModelCacheValid -Path $cachePath) {
+            Write-Host "Using cached $($Selected.Name) at $cachePath" -ForegroundColor Green
+        } else {
+            if (Test-Path $cachePath) {
+                Write-Host "  Found incomplete cache at $cachePath, removing." -ForegroundColor DarkGray
+                Remove-Item -Recurse -Force $cachePath
+            }
+            New-Item -ItemType Directory -Path $ModelsRoot -Force | Out-Null
+            Write-Host "Converting $($Selected.Name)..." -ForegroundColor Cyan
+            Write-Host "  From: $($Selected.HfId)"
+            Write-Host "  To:   $cachePath"
+            Write-Host "  This may take 5-20 minutes."
+            Write-Host ""
+            $args = @("export", "openvino", "--model", $Selected.HfId, "--weight-format", $Selected.Weight)
+            if ($Selected.Trust) { $args += "--trust-remote-code" }
+            $args += $cachePath
+            Write-Host "Running: optimum-cli $($args -join ' ')" -ForegroundColor DarkGray
+            & optimum-cli @args
+            if (-not $?) {
+                Write-Host "ERROR: Conversion failed." -ForegroundColor Red
+                Write-Host "  If unsupported architecture: needs newer optimum-intel" -ForegroundColor Yellow
+                return $false
             }
         }
-        $args = @("export", "openvino", "--model", $Selected.HfId, "--weight-format", $Selected.Weight)
-        if ($Selected.Trust) { $args += "--trust-remote-code" }
-        $args += $TargetDir
-        Write-Host "Running: optimum-cli $($args -join ' ')" -ForegroundColor DarkGray
-        & optimum-cli @args
-        if (-not $?) {
-            Write-Host "ERROR: Conversion failed." -ForegroundColor Red
-            Write-Host "  If unsupported architecture: needs newer optimum-intel" -ForegroundColor Yellow
-            return $false
-        }
+
+        New-ModelJunction -TargetDir $TargetDir -CachePath $cachePath
         Write-Host "[OK] $($Selected.Name)" -ForegroundColor Green
         return $true
     }

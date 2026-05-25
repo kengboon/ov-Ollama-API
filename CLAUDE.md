@@ -30,7 +30,7 @@ OpenAI-compatible LLM/VLM server for Intel hardware. NPU-first.
 - Runtime flags over hardcoded config (e.g. `--port`, `--device`).
 - When testing, use small payloads / short prompts. Don't run full model loads unless needed.
 - VLM prompts must be dead simple for small models (3B). One question, one answer, minimal JSON. All logic in Python, not in the prompt.
-- Qwen3-VL is not yet supported by optimum-intel (as of 2026-04-12).
+- Qwen3-VL is now pre-exported by Intel (OpenVINO/Qwen3-VL-8B-Instruct-int4-ov, May 2026) — not yet tested here. Earlier note about optimum-intel support is obsolete.
 
 ## Known issues
 
