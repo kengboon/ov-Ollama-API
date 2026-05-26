@@ -26,6 +26,7 @@ if ($ServerArgs -match '--port\s+(\d+)') {
     $Port = [int]$Matches[1]
 }
 $Url = "http://localhost:$Port"
+Write-Host "  Launcher polling: $Url" -ForegroundColor DarkCyan
 
 # Activate venv (Scripts on Windows, bin on POSIX)
 $VenvBinDir = if ($IsWindows) { "Scripts" } else { "bin" }
@@ -95,11 +96,11 @@ while ($Elapsed -lt $MaxWait) {
         $spin = $Spinner[$SpinIdx % 4]
         $SpinIdx++
         $bar = "#" * [math]::Min([int]($Elapsed / 2), 40)
-        Write-Host "`r  [$spin] Loading models... $bar" -NoNewline
+        Write-Host "`r  [$spin] Loading models on $Url ... $bar" -NoNewline
     } catch {
         $spin = $Spinner[$SpinIdx % 4]
         $SpinIdx++
-        Write-Host "`r  [$spin] Waiting for server..." -NoNewline
+        Write-Host "`r  [$spin] Waiting for server at $Url ... $($_.Exception.Message)        " -NoNewline
     }
 }
 
