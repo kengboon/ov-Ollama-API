@@ -12,37 +12,18 @@ function Open-Url($url) {
     try { Start-Process $url } catch { Write-Host "  Open $url in your browser" -ForegroundColor DarkGray }
 }
 
-function Test-PortFree($port) {
-    # Bind to Any (0.0.0.0) to match what nollama.py binds — Flask's
-    # host="0.0.0.0". Loopback-only here is a false-positive trap on
-    # Windows: a process bound to 0.0.0.0 doesn't block a subsequent
-    # 127.0.0.1 bind, so the Loopback test would say "free" while the
-    # real bind later fails.
-    try {
-        $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $port)
-        $l.Start(); $l.Stop()
-        return $true
-    } catch { return $false }
-}
-
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Pick an available port in 8000..8009. Hard fail if all are busy — bumping
-# the default by ten is plenty for the usual case (orphan NoLlama, another
-# local dev server); ten in a row means investigate, don't keep climbing.
-$BasePort = 8000
-$Port = $null
-for ($p = $BasePort; $p -lt ($BasePort + 10); $p++) {
-    if (Test-PortFree $p) { $Port = $p; break }
-}
-if (-not $Port) {
-    Write-Host "  ERROR: ports $BasePort..$($BasePort + 9) all in use." -ForegroundColor Red
-    Write-Host "  Free one (likely an orphan server) and retry." -ForegroundColor Red
-    exit 1
-}
-if ($Port -ne $BasePort) {
-    Write-Host "  Port $BasePort is in use; using $Port instead." -ForegroundColor Yellow
+# Default port is 8000. If the user passed --port N in -ServerArgs (or
+# edited the generated start.ps1 to do so), use that for the browser-open
+# and /health polling so they match what nollama.py will bind to.
+# Auto-detect was removed: on Windows, processes can share 0.0.0.0:N at
+# the socket layer in ways that make bind-tests unreliable. Better to
+# leave port handling explicit and let the user override on the CLI.
+$Port = 8000
+if ($ServerArgs -match '--port\s+(\d+)') {
+    $Port = [int]$Matches[1]
 }
 $Url = "http://localhost:$Port"
 
@@ -50,8 +31,9 @@ $Url = "http://localhost:$Port"
 $VenvBinDir = if ($IsWindows) { "Scripts" } else { "bin" }
 & (Join-Path $ScriptDir "venv" $VenvBinDir "Activate.ps1")
 
-# Start server in background — pass the port the launcher picked.
-$AllArgs = @((Join-Path $ScriptDir "nollama.py"), "--port", "$Port")
+# Start server in background. $ServerArgs is pass-through verbatim —
+# nollama.py owns argparse, including --port (default 8000).
+$AllArgs = @((Join-Path $ScriptDir "nollama.py"))
 if ($ServerArgs) {
     $AllArgs += $ServerArgs.Split(" ", [StringSplitOptions]::RemoveEmptyEntries)
 }
