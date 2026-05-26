@@ -16,7 +16,6 @@ Usage:
 
 import argparse
 import base64
-import contextlib
 import io
 import itertools
 import json
@@ -29,31 +28,6 @@ from datetime import datetime
 from pathlib import Path
 from queue import Queue, Empty
 from urllib.parse import unquote
-
-
-@contextlib.contextmanager
-def suppress_native_output():
-    """Redirect stdout+stderr at the OS fd level for the duration of the
-    block. openvino_genai's C++ side prints model-property dumps and a few
-    [INFO]/[XAttention] lines during pipeline construction and warmup;
-    Python-level sys.stdout redirection doesn't catch them — only OS-fd
-    redirection does. Our own Python prints inside the block also get
-    swallowed, so wrap *only* the noisy native calls.
-    """
-    sys.stdout.flush(); sys.stderr.flush()
-    with open(os.devnull, "w") as devnull:
-        old_out = os.dup(1)
-        old_err = os.dup(2)
-        os.dup2(devnull.fileno(), 1)
-        os.dup2(devnull.fileno(), 2)
-        try:
-            yield
-        finally:
-            sys.stdout.flush(); sys.stderr.flush()
-            os.dup2(old_out, 1)
-            os.dup2(old_err, 2)
-            os.close(old_out)
-            os.close(old_err)
 
 # Silence OpenVINO's verbose property dump on model load (Model: OV Tokenizer
 # + ~25 lines of NETWORK_NAME / NUM_STREAMS / INFERENCE_NUM_THREADS / ...).
@@ -228,21 +202,20 @@ class DeviceSlot:
         print(f"  [{self.device_name}] Detected: {self.model_type.upper()} ({self.model_name})")
         print(f"  [{self.device_name}] Loading...", flush=True)
 
-        with suppress_native_output():
-            if vlm:
-                VLMPipe = getattr(ovg, "VLMPipeline", None)
-                if VLMPipe is None:
-                    raise RuntimeError("No VLMPipeline in this openvino_genai build.")
-                self.pipe = VLMPipe(str(model_dir), device=self.device_id)
+        if vlm:
+            VLMPipe = getattr(ovg, "VLMPipeline", None)
+            if VLMPipe is None:
+                raise RuntimeError("No VLMPipeline in this openvino_genai build.")
+            self.pipe = VLMPipe(str(model_dir), device=self.device_id)
+        else:
+            # NPU has a default prompt limit of 1024 tokens — raise it
+            if self.device_name == "NPU":
+                self.pipe = ovg.LLMPipeline(
+                    str(model_dir), device=self.device_id,
+                    MAX_PROMPT_LEN=4096,
+                )
             else:
-                # NPU has a default prompt limit of 1024 tokens — raise it
-                if self.device_name == "NPU":
-                    self.pipe = ovg.LLMPipeline(
-                        str(model_dir), device=self.device_id,
-                        MAX_PROMPT_LEN=4096,
-                    )
-                else:
-                    self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id)
+                self.pipe = ovg.LLMPipeline(str(model_dir), device=self.device_id)
 
     def warmup(self):
         self.status = "warming_up"
@@ -253,13 +226,12 @@ class DeviceSlot:
         gen.do_sample = False
         gen.top_k = 1
         try:
-            with suppress_native_output():
-                if self.model_type == "vlm":
-                    self.pipe.generate(prompt="Hello", generation_config=gen)
-                else:
-                    history = ovg.ChatHistory()
-                    history.append({"role": "user", "content": "Hi"})
-                    self.pipe.generate(history, gen)
+            if self.model_type == "vlm":
+                self.pipe.generate(prompt="Hello", generation_config=gen)
+            else:
+                history = ovg.ChatHistory()
+                history.append({"role": "user", "content": "Hi"})
+                self.pipe.generate(history, gen)
             elapsed = time.perf_counter() - t0
             print(f" done ({elapsed:.1f}s)", flush=True)
             self.status = "ready"
@@ -557,8 +529,7 @@ class WhisperSlot:
                 "No WhisperPipeline in this openvino_genai build. "
                 "Upgrade to openvino-genai >= 2025.1."
             )
-        with suppress_native_output():
-            self.pipe = WhisperPipe(str(model_dir), self.device_id)
+        self.pipe = WhisperPipe(str(model_dir), self.device_id)
 
     def warmup(self):
         self.status = "ready"
