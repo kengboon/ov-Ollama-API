@@ -29,6 +29,11 @@ from pathlib import Path
 from queue import Queue, Empty
 from urllib.parse import unquote
 
+# Silence OpenVINO's verbose property dump on model load (Model: OV Tokenizer
+# + ~25 lines of NETWORK_NAME / NUM_STREAMS / INFERENCE_NUM_THREADS / ...).
+# Must be set BEFORE openvino is imported.
+os.environ.setdefault("OPENVINO_LOG_LEVEL", "0")
+
 import numpy as np
 import openvino as ov
 import openvino_genai as ovg
