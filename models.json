@@ -64,7 +64,7 @@
             "hf_id": "OpenVINO/Qwen3-VL-8B-Instruct-int8-ov",
             "source": "pre-exported",
             "est_size_gb": 9,
-            "notes": "Untested. INT8 variant of the recommended Qwen3-VL — retains OCR/number detail better than INT4 at ~9 GB. Try if INT4 loses fine text."
+            "notes": "Verified 2026-06-16 on Arc 140V in dual mode (NPU text + GPU vision): correct color/shape ID, ~6s. INT8 retains OCR/number detail better than INT4 at ~9 GB; fits a 16 GB ARC. Recommended GPU vision pairing for Qwen3-8B on NPU."
         },
         {
             "name": "Qwen2.5-VL 3B (INT8, convert)",

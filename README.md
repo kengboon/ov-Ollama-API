@@ -24,6 +24,23 @@ downloads it, and generates `start.ps1`. The launcher waits for the
 model to load (with a progress indicator), then opens the built-in
 chat UI in your browser at http://localhost:8000.
 
+## Recommended models
+
+New here, or re-running `install.ps1`? This is the proven pairing for a
+Core Ultra laptop (NPU + ARC iGPU) — just pick these two in the menu:
+
+| Role | Pick in the menu | HuggingFace | Size |
+|---|---|---|---|
+| **NPU chat** | Qwen3 8B (INT4-CW) | `OpenVINO/Qwen3-8B-int4-cw-ov` | ~5 GB |
+| **GPU vision** | Qwen3-VL 8B (INT8) | `OpenVINO/Qwen3-VL-8B-Instruct-int8-ov` | ~9 GB |
+
+Qwen3 8B is the best-quality text model verified on the NPU. Qwen3-VL 8B
+is the matching vision model — the INT8 build keeps fine detail (OCR,
+small numbers) and fits a 16 GB ARC; drop to the ~6 GB INT4 build
+(`…-int4-ov`) if you're tight on VRAM. Both are pre-exported (install
+instantly, no conversion), and returning users see them flagged
+**"Already on disk"** in the menu.
+
 ## What it does
 
 - **OpenAI API** (`/v1/chat/completions`) — works with any OpenAI client, OpenWebUI, etc.
@@ -436,8 +453,9 @@ verified yet — be honest about what's measured vs. assumed.
 
 | Model | Size | Notes |
 |---|---|---|
-| Qwen3-VL 8B (INT4) | ~6 GB | Recommended. Newer Qwen-VL generation; verified on Xe-LPG. |
-| Qwen2.5-VL 3B (INT8, convert) | ~4 GB | Recommended (proven). INT8 better at fine detail (OCR, numbers). |
+| Qwen3-VL 8B (INT8) | ~9 GB | Recommended pairing for 16 GB ARC. Keeps fine detail (OCR, numbers). |
+| Qwen3-VL 8B (INT4) | ~6 GB | Lighter alternative. Newer Qwen-VL generation; verified on Xe-LPG. |
+| Qwen2.5-VL 3B (INT8, convert) | ~4 GB | Proven. INT8 better at fine detail (OCR, numbers). |
 | Gemma 3 4B Vision (INT4) | ~3 GB | Untested. |
 | Gemma 3 12B Vision (INT4) | ~7 GB | Untested. Needs ~12 GB RAM with KV cache. |
 | InternVL2 4B (INT4) | ~3 GB | Untested. |
