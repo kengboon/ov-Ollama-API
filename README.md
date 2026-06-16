@@ -517,6 +517,18 @@ local single-user tool.
 - **NPU prompt limit is 4096 tokens.** Long chat histories will
   eventually exceed this. The UI doesn't trim history — use Ctrl+N to
   start fresh if you hit the limit.
+- **Vision runs on the GPU, not the NPU — by design.** The NPU *can*
+  load a VLM (Qwen2.5-VL-3B compiles and runs via VLMPipeline; Qwen3.5
+  and MiniCPM-V don't compile at all), but the NPU caps the prompt at
+  ~1024 tokens *including image tokens*, and Qwen2.5-VL spends one token
+  per 28×28 px. That leaves a usable ceiling around **768×768 (~784
+  image tokens)**: at that size — or smaller — it answers correctly, so
+  NPU vision works **well-ish on very small images** (a 256–512px crop is
+  fine). But prefill already takes ~17s at the ceiling, and a plain
+  1024×768 photo overflows the cap and fails outright (720p/1080p never
+  stand a chance). So vision stays on the GPU, which has no such cap,
+  runs at full resolution, and is faster. Measured with
+  `test_npu_vlm_imagesize.py`.
 - **Ollama management endpoints are stubs.** `/api/pull`, `/api/delete`,
   `/api/copy` return success but don't do anything. Model management is
   via `install.ps1` or `download-model.ps1`, not the API.

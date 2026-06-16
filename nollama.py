@@ -49,7 +49,18 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def is_vlm(model_dir):
-    """Detect if a model is a VLM by checking config.json."""
+    """Detect if a model is a VLM.
+
+    The definitive signal is structural: OpenVINO exports a VLM as a
+    multi-component model with a separate vision encoder
+    (openvino_vision_embeddings_model.xml) alongside the language model,
+    whereas a text-only LLM is a single openvino_model.xml. Architecture-name
+    sniffing misses new generations — e.g. Qwen3.5 reports
+    Qwen3_5ForConditionalGeneration / qwen3_5, matching none of the keys below
+    — so check the files first and fall back to the config keys.
+    """
+    if os.path.isfile(os.path.join(model_dir, "openvino_vision_embeddings_model.xml")):
+        return True
     cfg_path = os.path.join(model_dir, "config.json")
     if not os.path.isfile(cfg_path):
         return False

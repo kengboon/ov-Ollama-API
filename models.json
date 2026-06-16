@@ -39,11 +39,32 @@
 
     "gpu_vlm": [
         {
+            "name": "Qwen3.5 4B (INT4)",
+            "hf_id": "OpenVINO/Qwen3.5-4B-int4-ov",
+            "source": "pre-exported",
+            "est_size_gb": 4,
+            "notes": "Experimental. Newest Qwen generation, natively multimodal (image-text-to-text) — full VLM on GPU. Untested here; needs OpenVINO 2026.2+."
+        },
+        {
+            "name": "Qwen3.5 9B (INT4)",
+            "hf_id": "OpenVINO/Qwen3.5-9B-int4-ov",
+            "source": "pre-exported",
+            "est_size_gb": 6,
+            "notes": "Experimental. Qwen3.5 generation, natively multimodal (image-text-to-text) — full VLM on GPU. Untested here; needs OpenVINO 2026.2+."
+        },
+        {
             "name": "Qwen3-VL 8B (INT4)",
             "hf_id": "OpenVINO/Qwen3-VL-8B-Instruct-int4-ov",
             "source": "pre-exported",
             "est_size_gb": 6,
             "notes": "Recommended. Newer Qwen-VL generation. Verified on Xe-LPG iGPU for OCR, color/count, no hallucination on empty input. Like all VLMs, prone to confident hallucination on ambiguous images (e.g., invented make/model/year from unbadged photos) — prompt for visible features only and ask for uncertainty explicitly."
+        },
+        {
+            "name": "Qwen3-VL 8B (INT8)",
+            "hf_id": "OpenVINO/Qwen3-VL-8B-Instruct-int8-ov",
+            "source": "pre-exported",
+            "est_size_gb": 9,
+            "notes": "Untested. INT8 variant of the recommended Qwen3-VL — retains OCR/number detail better than INT4 at ~9 GB. Try if INT4 loses fine text."
         },
         {
             "name": "Qwen2.5-VL 3B (INT8, convert)",
@@ -81,33 +102,37 @@
             "source": "pre-exported",
             "est_size_gb": 3,
             "notes": "Untested. Microsoft."
+        },
+        {
+            "name": "Gemma 4 E2B Vision (INT4)",
+            "hf_id": "OpenVINO/gemma-4-E2B-it-int4-ov",
+            "source": "pre-exported",
+            "est_size_gb": 4,
+            "notes": "Untested. Google Gemma 4 — efficient (E2B effective-2B) successor to Gemma 3. Needs OpenVINO 2026.2+."
         }
     ],
 
     "whisper": [
         {
-            "name": "Whisper Base",
-            "hf_id": "openai/whisper-base",
-            "source": "convert",
-            "weight_format": "fp16",
-            "est_size_gb": 0.3,
-            "notes": "Fastest. English-best."
+            "name": "Whisper Base (INT8)",
+            "hf_id": "OpenVINO/whisper-base-int8-ov",
+            "source": "pre-exported",
+            "est_size_gb": 0.2,
+            "notes": "Fastest. Multi-language. Pre-exported — instant install, no conversion step."
         },
         {
-            "name": "Whisper Small",
-            "hf_id": "openai/whisper-small",
-            "source": "convert",
-            "weight_format": "fp16",
-            "est_size_gb": 1,
-            "notes": "Good balance. Multi-language."
+            "name": "Whisper Small (INT8)",
+            "hf_id": "OpenVINO/whisper-small-int8-ov",
+            "source": "pre-exported",
+            "est_size_gb": 0.4,
+            "notes": "Good balance. Multi-language. Pre-exported — instant install."
         },
         {
-            "name": "Whisper Medium",
-            "hf_id": "openai/whisper-medium",
-            "source": "convert",
-            "weight_format": "fp16",
-            "est_size_gb": 3,
-            "notes": "Best accuracy under 16GB. Multi-language."
+            "name": "Whisper Medium (INT8)",
+            "hf_id": "OpenVINO/whisper-medium-int8-ov",
+            "source": "pre-exported",
+            "est_size_gb": 0.9,
+            "notes": "Best accuracy under 16 GB. Multi-language. Pre-exported — instant install."
         }
     ],
 
@@ -118,6 +143,13 @@
             "source": "pre-exported",
             "est_size_gb": 8,
             "notes": "Great reasoning. Sweet spot."
+        },
+        {
+            "name": "Qwen3.6 27B (INT4)",
+            "hf_id": "OpenVINO/Qwen3.6-27B-int4-ov",
+            "source": "pre-exported",
+            "est_size_gb": 16,
+            "notes": "Untested. Newest generation, natively multimodal. ~16 GB int4 — borderline on a 16 GB Arc, may fall back to CPU silently like the 30B-A3B. Needs OpenVINO 2026.2+."
         },
         {
             "name": "Phi 4 (INT4)",

@@ -135,21 +135,31 @@ if (Test-Path $ModelsRoot) {
         $binPath = if (Test-Path $vlmBin) { $vlmBin } else { $llmBin }
         $binSize = (Get-Item $binPath).Length
         $sizeGB = [math]::Round($binSize / 1GB, 1)
+        # Mirror nollama.py is_vlm(): the definitive VLM signal is the
+        # presence of a separate vision encoder; fall back to arch/model_type
+        # keys for older exports. Catches new generations (Qwen3.5 reports
+        # Qwen3_5ForConditionalGeneration / qwen3_5, matching no key).
         $mtype = "llm"
-        $cfgPath = Join-Path $_.FullName "config.json"
-        if (Test-Path $cfgPath) {
-            try {
-                $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
-                $arch = ""
-                if ($cfg.architectures -and $cfg.architectures.Count -gt 0) { $arch = $cfg.architectures[0].ToLower() }
-                $mt = if ($cfg.model_type) { $cfg.model_type.ToLower() } else { "" }
-                if ($arch -match "vl|vision|llava|qwen2vl|internvl|minicpm" -or $mt -match "vl|vision") {
-                    $mtype = "vlm"
-                }
-            } catch {}
+        if (Test-Path (Join-Path $_.FullName "openvino_vision_embeddings_model.xml")) {
+            $mtype = "vlm"
+        } else {
+            $cfgPath = Join-Path $_.FullName "config.json"
+            if (Test-Path $cfgPath) {
+                try {
+                    $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+                    $arch = ""
+                    if ($cfg.architectures -and $cfg.architectures.Count -gt 0) { $arch = $cfg.architectures[0].ToLower() }
+                    $mt = if ($cfg.model_type) { $cfg.model_type.ToLower() } else { "" }
+                    if ($arch -match "vl|vision|llava|qwen2vl|internvl|minicpm" -or $mt -match "vl|vision") {
+                        $mtype = "vlm"
+                    }
+                } catch {}
+            }
         }
-        # Detect NPU compatibility: needs int4-cw quantization and reasonable size
-        $npuOk = ($_.Name -match "int4-cw" -or $_.Name -match "cw-ov") -and $sizeGB -lt 10
+        # Detect NPU compatibility: needs int4 quantization and reasonable size.
+        # Matches the older "-int4-cw" / "-cw-ov" naming and the newer plain
+        # "-int4-ov" exports (e.g. Qwen3.5). Soft filter — user still confirms.
+        $npuOk = ($_.Name -match "int4") -and $sizeGB -lt 10
         [PSCustomObject]@{ Name = $_.Name; Path = $_.FullName; SizeGB = $sizeGB; Type = $mtype; NpuOk = $npuOk }
     })
 }
@@ -189,43 +199,76 @@ function Show-ModelMenu {
 
     $items = @()
 
-    # Local models first
-    if ($LocalModels.Count -gt 0) {
-        Write-Host "  $LocalLabel" -ForegroundColor Yellow
-        foreach ($lm in $LocalModels) {
-            $items += [PSCustomObject]@{
-                Action = "local"; Name = $lm.Name; Path = $lm.Path
-                HfId = $null; Source = $null; Weight = $null; Trust = $false
-                SizeGB = $lm.SizeGB; Notes = "Already on disk"
-            }
-            $i = $items.Count
-            Write-Host "    $i. $($lm.Name)" -NoNewline
-            Write-Host "  ($($lm.SizeGB) GB)" -ForegroundColor DarkGray -NoNewline
-            Write-Host "  Already on disk" -ForegroundColor DarkGray
+    # Partition into on-disk vs downloadable.
+    #
+    # On-disk has two sources:
+    #   1. The generic ~/models scan passed in as $LocalModels.
+    #   2. Any registry model whose cache already exists. This catches
+    #      multimodal models that the type-based scan filtered out of THIS
+    #      menu — e.g. Qwen3.5 reports architecture Qwen3_5ForConditional-
+    #      Generation, so the scan tags it "llm" and it never reaches the
+    #      vlm-filtered vision menu. Checking the cache directly (the same
+    #      path Install-Model would use) is independent of that fragile
+    #      classification, so it shows as instant instead of a bogus download.
+    $onDisk = @()
+    foreach ($lm in $LocalModels) {
+        $onDisk += [PSCustomObject]@{
+            Action = "local"; Name = $lm.Name; Path = $lm.Path
+            HfId = $null; Source = $null; Weight = $null; Trust = $false
+            SizeGB = $lm.SizeGB; Notes = "Already on disk"
         }
-        Write-Host ""
     }
 
-    # Registry models — skip any already on disk
     $localNames = @($LocalModels | ForEach-Object { $_.Name.ToLower() })
-    $filteredRegistry = @($RegistryModels | Where-Object {
-        $repoName = ($_.hf_id -split '/')[-1].ToLower()
-        $repoName -notin $localNames
-    })
-    if ($filteredRegistry.Count -gt 0) {
-        Write-Host "  Download from HuggingFace:" -ForegroundColor Yellow
-        foreach ($dm in $filteredRegistry) {
-            $dlTag = if ($dm.source -eq "pre-exported") { "download" } else { "convert" }
-            $items += [PSCustomObject]@{
+    $downloads = @()
+    foreach ($dm in $RegistryModels) {
+        $repoName = ($dm.hf_id -split '/')[-1]
+        # Already surfaced by the generic scan (matched on folder name)?
+        if ($repoName.ToLower() -in $localNames) { continue }
+
+        # Compute the cache path Install-Model would use (convert appends the
+        # weight format so int4/int8 of the same model don't collide).
+        $cacheName = if ($dm.source -eq "convert") { "$repoName-$($dm.weight_format)" } else { $repoName }
+        $cachePath = Join-Path $ModelsRoot $cacheName
+
+        if (Test-ModelCacheValid -Path $cachePath) {
+            $onDisk += [PSCustomObject]@{
+                Action = "local"; Name = $dm.name; Path = $cachePath
+                HfId = $dm.hf_id; Source = $dm.source
+                Weight = $dm.weight_format; Trust = $dm.trust_remote_code
+                SizeGB = $dm.est_size_gb; Notes = "Already on disk"
+            }
+        } else {
+            $downloads += [PSCustomObject]@{
                 Action = $dm.source; Name = $dm.name; Path = $null
                 HfId = $dm.hf_id; Source = $dm.source
                 Weight = $dm.weight_format; Trust = $dm.trust_remote_code
                 SizeGB = $dm.est_size_gb; Notes = $dm.notes
             }
+        }
+    }
+
+    if ($onDisk.Count -gt 0) {
+        Write-Host "  $LocalLabel" -ForegroundColor Yellow
+        foreach ($od in $onDisk) {
+            $items += $od
             $i = $items.Count
-            Write-Host "    $i. $($dm.name)" -NoNewline
-            Write-Host "  (~$($dm.est_size_gb) GB, $dlTag)" -ForegroundColor DarkGray -NoNewline
-            Write-Host "  $($dm.notes)" -ForegroundColor DarkGray
+            Write-Host "    $i. $($od.Name)" -NoNewline
+            Write-Host "  ($($od.SizeGB) GB)" -ForegroundColor DarkGray -NoNewline
+            Write-Host "  Already on disk" -ForegroundColor DarkGray
+        }
+        Write-Host ""
+    }
+
+    if ($downloads.Count -gt 0) {
+        Write-Host "  Download from HuggingFace:" -ForegroundColor Yellow
+        foreach ($dm in $downloads) {
+            $items += $dm
+            $dlTag = if ($dm.Source -eq "pre-exported") { "download" } else { "convert" }
+            $i = $items.Count
+            Write-Host "    $i. $($dm.Name)" -NoNewline
+            Write-Host "  (~$($dm.SizeGB) GB, $dlTag)" -ForegroundColor DarkGray -NoNewline
+            Write-Host "  $($dm.Notes)" -ForegroundColor DarkGray
         }
     }
 
