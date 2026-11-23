@@ -4,6 +4,7 @@
     "head": "22de222cf8a6386e10f0f3362b037fa1a4380791",
     "kind": "pull",
     "merged": true,
+    "nudged": false,
     "state": "closed",
     "title": "[OpenVINO] Support NemotronH"
   },
